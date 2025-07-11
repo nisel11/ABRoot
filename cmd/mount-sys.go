@@ -16,6 +16,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"syscall"
@@ -88,6 +89,11 @@ func mountSys(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
+	sysroot := os.Getenv("ABROOT_SYSROOT")
+	if sysroot == "" {
+		sysroot = "/"
+	}
+
 	manager := core.NewABRootManager()
 	present, err := manager.GetPresent()
 	if err != nil {
@@ -96,27 +102,27 @@ func mountSys(cmd *cobra.Command, _ []string) error {
 
 	// remount as writeable
 	if !dryRun {
-		err := syscall.Mount("/", "/", "", syscall.MS_REMOUNT, "")
+		err := syscall.Mount(sysroot, sysroot, "", syscall.MS_REMOUNT, "")
 		if err != nil {
 			cmdr.Error.Println("failed to remount root", err)
 		}
 	}
 
-	err = mountVar(manager.VarPartition, dryRun)
+	err = mountVar(sysroot, manager.VarPartition, dryRun)
 	if err != nil {
 		cmdr.Error.Println(err)
 		os.Exit(5)
 	}
 
 	if !dryRun {
-		err = core.RepairRootIntegrity("/")
+		err = core.RepairRootIntegrity(sysroot)
 		if err != nil {
 			cmdr.Error.Println(err)
 			os.Exit(4)
 		}
 	}
 
-	err = mountBindMounts(dryRun)
+	err = mountBindMounts(sysroot, dryRun)
 	if err != nil {
 		cmdr.Error.Println(err)
 		os.Exit(6)
@@ -125,7 +131,7 @@ func mountSys(cmd *cobra.Command, _ []string) error {
 	if present.Label == "" {
 		return &PartNotFoundError{"current root"}
 	}
-	err = mountOverlayMounts(present.Label, dryRun)
+	err = mountOverlayMounts(sysroot, present.Label, dryRun)
 	if err != nil {
 		cmdr.Error.Println(err)
 		os.Exit(7)
@@ -134,7 +140,7 @@ func mountSys(cmd *cobra.Command, _ []string) error {
 	if present.Uuid == "" {
 		return &PartNotFoundError{"current root"}
 	}
-	err = adjustFstab(present.Uuid, dryRun)
+	err = adjustFstab(sysroot, present.Uuid, dryRun)
 	if err != nil {
 		cmdr.Error.Println(err)
 		os.Exit(8)
@@ -149,15 +155,16 @@ func mountSys(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
-func mountVar(varPart core.Partition, dryRun bool) error {
-	cmdr.FgDefault.Println("mounting " + varPart.Device + " in /var")
+func mountVar(sysroot string, varPart core.Partition, dryRun bool) error {
+	varMountPoint := filepath.Join(sysroot, "var")
+	cmdr.FgDefault.Println("mounting " + varPart.Device + " in " + varMountPoint)
 
 	if varPart.Device == "" {
 		return &PartNotFoundError{settings.Cnf.PartLabelVar}
 	}
 
 	if !dryRun {
-		err := varPart.Mount("/var")
+		err := varPart.Mount(varMountPoint)
 		if err != nil {
 			return err
 		}
@@ -166,14 +173,14 @@ func mountVar(varPart core.Partition, dryRun bool) error {
 	return nil
 }
 
-func mountBindMounts(dryRun bool) error {
+func mountBindMounts(sysroot string, dryRun bool) error {
 	type bindMount struct {
 		from, to string
 		options  uintptr
 	}
 
 	binds := []bindMount{
-		{"/.system/usr", "/.system/usr", syscall.MS_RDONLY},
+		{filepath.Join(sysroot, ".system", "usr"), filepath.Join(sysroot, ".system", "usr"), syscall.MS_RDONLY},
 	}
 
 	for _, bind := range binds {
@@ -189,7 +196,7 @@ func mountBindMounts(dryRun bool) error {
 	return nil
 }
 
-func mountOverlayMounts(rootLabel string, dryRun bool) error {
+func mountOverlayMounts(sysroot, rootLabel string, dryRun bool) error {
 	type overlayMount struct {
 		destination       string
 		lowerdirs         []string
@@ -197,8 +204,18 @@ func mountOverlayMounts(rootLabel string, dryRun bool) error {
 	}
 
 	overlays := []overlayMount{
-		{"/.system/etc", []string{"/.system/etc"}, "/var/lib/abroot/etc/" + rootLabel, "/var/lib/abroot/etc/" + rootLabel + "-work"},
-		{"/opt", []string{"/.system/opt"}, "/var/opt", "/var/opt-work"},
+		{
+			filepath.Join(sysroot, ".system", "etc"),
+			[]string{filepath.Join(sysroot, ".system", "etc")},
+			filepath.Join(sysroot, "var", "lib", "abroot", "etc", rootLabel),
+			filepath.Join(sysroot, "var", "lib", "abroot", "etc", rootLabel+"-work"),
+		},
+		{
+			filepath.Join(sysroot, "opt"),
+			[]string{filepath.Join(sysroot, ".system", "opt")},
+			filepath.Join(sysroot, "var", "opt"),
+			filepath.Join(sysroot, "var", "opt-work"),
+		},
 	}
 
 	for _, overlay := range overlays {
@@ -224,10 +241,10 @@ func mountOverlayMounts(rootLabel string, dryRun bool) error {
 	return nil
 }
 
-func adjustFstab(uuid string, dryRun bool) error {
+func adjustFstab(sysroot, uuid string, dryRun bool) error {
 	cmdr.FgDefault.Println("switching the root in fstab")
 
-	const fstabFile = "/etc/fstab"
+	fstabFile := filepath.Join(sysroot, "etc/fstab")
 	systemMounts := []string{"/", "/var", "/.system/usr", "/.system/etc"}
 	varBindMountExists := map[string]bool{
 		"/home":  false,

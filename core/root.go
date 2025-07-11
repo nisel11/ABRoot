@@ -15,6 +15,7 @@ package core
 
 import (
 	"errors"
+	"os"
 
 	"github.com/vanilla-os/abroot/settings"
 )
@@ -116,8 +117,13 @@ func (a *ABRootManager) IsCurrent(partition Partition) bool {
 func (a *ABRootManager) IdentifyPartition(partition Partition) (identifiedAs string, err error) {
 	PrintVerboseInfo("ABRootManager.IdentifyPartition", "running...")
 
+	sysroot := os.Getenv("ABROOT_SYSROOT")
+	if sysroot == "" {
+		sysroot = "/"
+	}
+
 	if partition.Label == settings.Cnf.PartLabelA || partition.Label == settings.Cnf.PartLabelB {
-		if partition.MountPoint == "/" {
+		if partition.MountPoint == sysroot {
 			PrintVerboseInfo("ABRootManager.IdentifyPartition", "partition is present")
 			return "present", nil
 		}
