@@ -15,9 +15,11 @@ package cmd
 
 import (
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -121,13 +123,15 @@ func unlockVar(cmd *cobra.Command, _ []string) error {
 	}
 
 	if varDisk == "" {
-		if settings.Cnf.PartCryptVar == "" {
-			cmdr.Error.Println("Encrypted var partition not found in configuration.")
-			os.Exit(3)
-			return nil
+		if _, err := os.Lstat("/dev/mapper/vos--var-var"); err == nil {
+			varDisk = "/dev/mapper/vos--var-var"
+		} else if path, err := filepath.EvalSymlinks("/dev/disk/by-partlabel/vos-var"); err == nil {
+			varDisk = path
+		} else if settings.Cnf.PartCryptVar != "" {
+			varDisk = settings.Cnf.PartCryptVar
+		} else {
+			return &VarInvalidError{}
 		}
-
-		varDisk = settings.Cnf.PartCryptVar
 	}
 
 	dryRun, err := cmd.Flags().GetBool("dry-run")
@@ -166,6 +170,17 @@ func unlockVar(cmd *cobra.Command, _ []string) error {
 	if dryRun {
 		cmdr.Info.Println("Dry run complete.")
 	} else {
+		// Try graphical unlock if available
+		if canUsePlymouth() {
+			err := unlockWithPlymouth(varDisk, uuid)
+			if err == nil {
+				cmdr.Info.Println("The system mounts have been performed successfully.")
+				return nil
+			}
+			cmdr.Warning.Println("Graphical unlock failed, falling back to console:", err)
+		}
+
+		// Fallback to console unlock
 		cryptsetupCmd := exec.Command("/usr/sbin/cryptsetup", "luksOpen", varDisk, "luks-"+uuid)
 		cryptsetupCmd.Stdin = os.Stdin
 		cryptsetupCmd.Stderr = os.Stderr
@@ -178,4 +193,42 @@ func unlockVar(cmd *cobra.Command, _ []string) error {
 	}
 
 	return nil
+}
+
+func canUsePlymouth() bool {
+	cmd := exec.Command("plymouth", "--ping")
+	return cmd.Run() == nil
+}
+
+func unlockWithPlymouth(device, uuid string) error {
+	plymouthCmd := exec.Command("plymouth", "ask-for-password", "--prompt=Please enter passphrase to unlock your data.")
+	plymouthCmd.Stderr = os.Stderr
+
+	out, err := plymouthCmd.Output()
+	if err != nil {
+		return err
+	}
+
+	password := strings.TrimSpace(string(out))
+	if password == "" {
+		return errors.New("empty password entered")
+	}
+
+	cryptsetupCmd := exec.Command("/usr/sbin/cryptsetup", "luksOpen", device, "luks-"+uuid)
+	stdinPipe, err := cryptsetupCmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	defer stdinPipe.Close()
+
+	if err := cryptsetupCmd.Start(); err != nil {
+		return err
+	}
+
+	_, err = io.WriteString(stdinPipe, password+"\n")
+	if err != nil {
+		return err
+	}
+
+	return cryptsetupCmd.Wait()
 }
